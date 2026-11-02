@@ -1,0 +1,25 @@
+# Data and course documents
+data/
+AML Assignment Instructions.docx
+
+# Office lock files
+~$*
+
+# Claude Code local settings
+.claude/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# LaTeX build files
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+report/*.pdf

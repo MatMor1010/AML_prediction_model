@@ -1,0 +1,41 @@
+\documentclass[12pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[letterpaper, margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{pdfpages}
+\tcbuselibrary{breakable}
+
+% Grey box for the question statements
+\newtcolorbox{question}{
+    breakable,
+    colback=gray!12,
+    colframe=gray!55,
+    boxrule=0.5pt,
+    arc=2pt,
+    left=6pt, right=6pt, top=4pt, bottom=4pt
+}
+
+% One horizontal strip of a handwritten scan, from #2 to #3 bp below the top of
+% the scanned page (841 bp tall). Showing a scan as consecutive strips lets it
+% start right under its question box and break across pages between lines.
+\newcommand{\scanstrip}[3]{%
+    \edef\scanstripopts{width=\linewidth, trim=8 \the\numexpr841-#3\relax\space 0 #2, clip}%
+    \par\noindent\expandafter\includegraphics\expandafter[\scanstripopts]{#1}\par
+}
+
+\begin{document}
+
+\input{Latex_lib/presentation_page}
+
+\section*{}
+
+
+
+
+\end{document}
