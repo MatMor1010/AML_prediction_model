@@ -1,49 +1,23 @@
-Data: AML_data_transformed.pkl, 588 rows x 146 columns
-Train/test rows: 470/118, positive rate 33.7%
 
-Features given:        145
-Pre-screened (SHAP):   40
-Chosen by forward:     8
-Chosen by stepwise:    9
-Kept:                  8 (forward)
-
-Why forward: CV pr_auc stepwise 0.7553 vs forward 0.7526, one standard error 0.0260, within one standard error, so the smaller set wins.
-
-Feature sets compared with the selection model (CV on train):
+Amount of variables:
+Without duplicates:    62 (of 145)
+Chosen by forward:     6
+Chosen by stepwise:    8
+Kept:                  8 (stepwise, best CV pr_auc)
+Feature sets compared with the small GBM (CV on train):
             n_features  roc_auc_mean  roc_auc_std  pr_auc_mean  pr_auc_std
 set                                                                       
-all                145        0.8130       0.0490       0.6951      0.0685
-candidates          40        0.8208       0.0444       0.7139      0.0583
-forward              8        0.8246       0.0218       0.7526      0.0486
-stepwise             9        0.8370       0.0284       0.7553      0.0582
-
-Kept features (SHAP in log-odds; + means higher values push towards high risk):
-                                 mean_abs_shap  share_of_total direction  mean_shap_above_avg  mean_shap_below_avg
-feature                                                                                                           
-in_person_visit_cnt                      0.609           0.316         +                0.802               -0.336
-txn_cash_out_cnt_5m                      0.416           0.215         -               -0.525                0.355
-tot_cross_border_cnt_12m                 0.403           0.209         +                1.065               -0.247
-geo_mail_addr_country_rate_high          0.154           0.080         +                1.844               -0.083
-prod_ted                                 0.143           0.074         -               -0.248                0.103
-prod_total_acct_cnt                      0.115           0.059         +                0.157               -0.088
-txn_cross_border_out_val_12m             0.049           0.026         +                0.383               -0.024
-txn_wires_in_high_val_6m                 0.041           0.021         +                0.496               -0.023
-
-Best params: {'learning_rate': 0.03, 'max_depth': 3, 'min_samples_leaf': 5, 'n_estimators': 100, 'subsample': 0.8}
-
-Final model:
-         cv_mean  cv_std   test
-roc_auc    0.808   0.027  0.773
-pr_auc     0.729   0.065  0.708
-
-At threshold 0.325 (max out-of-fold F1): precision 0.676, recall 0.625, F1 0.649
-
-Test confusion matrix:
-        pred_0  pred_1
-true_0      66      12
-true_1      15      25
-
-Note: CV scores of the selected set are slightly optimistic because selection used those folds;
-the test scores are the honest numbers.
-
-Runtime: 4.0 min
+all                 62        0.8191       0.0515       0.7107      0.0723
+candidates          50        0.8195       0.0519       0.7009      0.0703
+forward              6        0.8182       0.0212       0.7368      0.0666
+stepwise             8        0.8351       0.0337       0.7448      0.0854
+Kept features (pre-screen mean |SHAP|):
+feature
+in_person_visit_cnt                0.5249
+tot_cross_border_val_12m           0.3645
+txn_cash_out_cnt_3m                0.3393
+avg_cash_5m                        0.1906
+geo_mail_addr_country_rate_high    0.1487
+prod_cda                           0.0872
+prod_total_acct_cnt                0.0613
+txn_wires_in_high_cnt_12m          0.0178

@@ -1,87 +1,121 @@
-# GBM feature selection
+# GBM feature selection and modelling
 
-`src/gbm_feature_selection.py` picks a small set of features for the AML risk model, trains a gradient boosting model on them, checks it on clients it has never seen, and saves everything to `results/gbm_feature_selection/`.
+Two scripts, run one after the other:
+
+1. `src/gbm_feature_selection.py` picks a small set of features for the AML risk model and saves them to `results/gbm_feature_selection/`.
+2. `src/modelling.py` trains a gradient boosting model (GBM) on those features, with and without SMOTE, keeps the better one, checks it on clients it has never seen, and saves everything to `results/modelling/`.
 
 ## Run it
 
-From the root of the repo:
+From the root of the repo, after `src/Data_transformation.py` (both scripts read `data/AML_data_transformed.pkl`):
 
 ```
 uv run python src/gbm_feature_selection.py
+uv run python src/modelling.py
 ```
 
-It takes about 4 minutes. The results are printed and also saved in `summary.txt`.
+`modelling.py` reads the features from `results/gbm_feature_selection/selected_features.json`, so rerun it every time you rerun the selection. Each script prints its results and saves them in its own `summary.txt`.
 
-## Settings
+If you just cloned the repo, run `uv sync` first: SMOTE needs the `imbalanced-learn` package.
 
-All settings are at the top of the file. You shouldn't need to edit anything else.
+## What you can change
 
-| Setting | What it does |
+Both scripts read top to bottom like `Data_transformation.py`, and the values are written where they're used:
+
+| What | Where |
 |---|---|
-| `DATA_PATH` | The data file (`.pkl`, `.csv`, `.parquet` or `.xlsx`) |
-| `TARGET` | The column to predict (`rating`, 1 = high risk) |
-| `DROP_COLS` | Columns that are not features, e.g. IDs |
-| `RUN_NAME` | Name of the output folder in `results/` |
-| `MAX_CANDIDATES` | How many features go into selection (40) |
-| `SELECTION_METRIC` | The score selection tries to maximize: PR AUC (`average_precision`) or ROC AUC (`roc_auc`) |
-| `TARGET_RECALL` | `None` picks the threshold with the best F1. Set it to e.g. `0.8` to catch at least 80% of high-risk clients |
-| `SELECTION_MODEL` | The small model used to pick features |
-| `MODEL`, `PARAM_GRID` | The final model and the settings it is tuned over |
+| The small model used to pick features | `small_gbm`, `gbm_feature_selection.py` |
+| How many features go into selection (50) | `shap_rank.index[:50]`, step 2 of `gbm_feature_selection.py` |
+| The final model's tuning grid | `param_grid`, step 2 of `modelling.py` (keep the `gbm__` in front of each setting) |
+| The SMOTE rule (only wins if more than one standard error better) | `approach = ...`, step 2 of `modelling.py` |
+| The threshold rule (best F1) | Step 3 of `modelling.py`. The comment shows how to catch at least 80% of high-risk clients instead |
 
-Every column except `TARGET` and `DROP_COLS` is a feature. If you add or remove columns in the data, the script and all its outputs adapt on their own.
+Every column except `rating` is a feature. If you add or remove columns in `Data_transformation.py`, both scripts and all their outputs adapt on their own.
+
+If you change `SEED`, change it in both scripts. `modelling.py` checks that it uses the same test set as the selection and stops with an error if not.
 
 ## How it works
 
 On the current data:
 
 ```
-145 features  →  pre-screen  →  40 candidates  →  forward / stepwise  →  8 features  →  tune  →  test
+gbm_feature_selection.py:  145 features  →  drop near-duplicates  →  62  →  pre-screen  →  50 candidates  →  forward / stepwise  →  kept features
+modelling.py:              kept features  →  tune without / with SMOTE  →  threshold  →  test  →  SHAP
 ```
 
-1. **Split.** 20% of clients are set aside as a test set and not touched until step 7. Everything else uses 5-fold cross-validation (CV) on the other 80%.
-2. **Pre-screen.** The small model is fitted once on all features. SHAP measures how much each feature moves its predictions, and the 40 most important features become the candidates.
-3. **Forward and stepwise selection.** Both start with no features and add the one that improves the CV score most, one at a time, until all 40 are in.
+**Both scripts.** 20% of clients are set aside as a test set. Both scripts make the same split (same `SEED`), so the selection never sees the test clients. Everything else uses 5-fold cross-validation (CV) on the other 80%, with the same folds in both scripts.
+
+`gbm_feature_selection.py`:
+
+1. **Split and drop near-duplicates.** Many features measure the same thing (e.g. the 3, 6 and 12 month versions, or `txn_wires_in_*` vs `txn_cross_border_in_*`). On the training set, any feature with a rank correlation of 0.95 or more with a stronger one is dropped, where "stronger" means a better AUC on its own. This takes the data from 145 to 62 features. Twins otherwise make the selection pick one of them more or less at random, and split the SHAP importance between them. The dropped features and the one kept instead are listed in `duplicates.csv`.
+2. **Pre-screen.** The small model is fitted once on all features. SHAP measures how much each feature moves its predictions, and the 50 most important features become the candidates.
+3. **Forward and stepwise selection.** Both start with no features and add the one that improves the CV score most, one at a time, until all 50 are in.
    - *Forward* never removes a feature once it's in.
    - *Stepwise* checks after every addition whether dropping an earlier feature now gives a better score.
 
-   Each one then keeps the smallest set whose score is close to the best it found. Extra features add little and make the model harder to explain.
-4. **Pick the final set.** Forward and stepwise are compared on CV. The higher score wins, but if the two are within one standard error, the smaller set wins.
-5. **Tune.** The final model is tuned on just those features, by trying every combination in `PARAM_GRID` (32 combinations × 5 folds).
-6. **Choose the threshold.** The model gives a probability, and the threshold turns it into high risk yes or no. It's chosen on the training data only, never on the test set.
-7. **Test.** The final model is scored once on the test set: ROC AUC, PR AUC, precision, recall, F1 and a confusion matrix.
-8. **Explain.** SHAP shows how much each kept feature pushes each client towards high or low risk. The results are summarized in `shap_summary.csv`.
+   Each one then keeps the smallest set whose score is within one standard error of the best it found. Extra features add little and make the model harder to explain.
+4. **Pick the final set.** Forward and stepwise are compared on CV, and the one with the higher PR AUC is kept. The kept features are saved to `selected_features.json`.
+
+`modelling.py`:
+
+1. **Load.** The data, the kept features, and the same split. It checks that the test set is the same one the selection never saw.
+2. **Tune, without and with SMOTE.** The model is tuned on the kept features by trying every combination in `param_grid` (216 combinations × 5 folds). This is done twice, with the same features, folds and grid, so the only difference is SMOTE (see below). SMOTE only wins if it beats the plain model by more than one standard error, otherwise the simpler model is kept.
+3. **Choose the threshold.** The model gives a probability, and the threshold turns it into high risk yes or no. It's chosen on the training data only, never on the test set. This also handles SMOTE: a model trained on 50/50 data gives higher probabilities, and the threshold is picked on that same model.
+4. **Test.** The final model is scored once on the test set: ROC AUC, PR AUC, precision, recall, F1 and a confusion matrix.
+5. **Explain.** SHAP shows how much each kept feature pushes each client towards high or low risk. The results are summarized in `shap_summary.csv`.
 
 ## Why a smaller model is used for selection
 
-Steps 2 to 4 use `SELECTION_MODEL`: a deliberately small gradient boosting model with fixed settings (100 trees, each only 2 levels deep). The tuned model is only fitted in step 5. This helps in four ways.
+The selection uses `small_gbm`: a deliberately small gradient boosting model with fixed settings (100 trees, each only 2 levels deep). The tuned model only comes in `modelling.py`. This helps in four ways.
 
-- **Speed.** Selection fits a lot of models. Forward selection on 40 candidates tries 40 + 39 + … + 1 = 820 feature sets, each on 5 folds, so 4,100 fits, and stepwise does even more. A small model fits quickly, so the whole script runs in minutes. Tuning the model inside every one of those steps would multiply the work by 32.
+- **Speed.** Selection fits a lot of models. Forward selection on 50 candidates tries 50 + 49 + … + 1 = 1,275 feature sets, each on 5 folds, so 6,375 fits, and stepwise does even more. A small model fits quickly. Tuning the model inside every one of those steps would multiply the work by 216.
 - **A fair comparison.** The small model's settings never change, so when the score goes up or down, it's because of the features and not because of the settings.
 - **Less overfitting.** With only 470 training clients, a big model can learn patterns that are just noise. Shallow trees can't do that as easily, so a feature that helps the small model is more likely to really matter.
-- **Good enough to rank features.** At this stage we only need to know *which* features matter, not get the best possible score. Getting the best score is the job of the tuning step, which is cheap because it only sees the final 8 features.
+- **Good enough to rank features.** At this stage we only need to know *which* features matter, not get the best possible score. Getting the best score is the job of the tuning step, which is cheap because it only sees the kept features.
 
-The pre-screen uses the same idea. One fit of the small model ranks all 145 features. Without it, forward selection on all 145 would need 10,585 feature sets × 5 folds, so about 53,000 fits.
+The pre-screen uses the same idea. One fit of the small model ranks all 62 remaining features, and the top 50 go into selection.
 
 The trade-off: the features chosen are the best ones *for the small model*. The tuned model might have preferred slightly different ones.
+
+## SMOTE
+
+About a third of clients are high risk. SMOTE creates synthetic high-risk clients by picking a real one and placing a new point between it and one of its nearest high-risk neighbours, until both classes are the same size. Only high-risk clients are added; the others are left as they are. There's no downsampling, because with 588 clients we can't afford to throw any away.
+
+Three things make the comparison fair:
+
+- **SMOTE only touches the training folds.** It sits inside an `imblearn` `Pipeline`, so in every CV split it upsamples the 4 training folds only. The validation fold, and later the test set, contain real clients only. Upsampling before the split would put copies of the same clients on both sides and make the scores look better than they are.
+- **Binary features stay binary.** Plain SMOTE would give values like `prod_ted = 0.37`. `SMOTENC` takes the most common value among the neighbours for the binary features (any feature with exactly 2 values).
+- **Selection is done once, without SMOTE.** Both approaches are tuned on the same kept features, so the comparison is only about SMOTE.
+
+Both approaches are scored with the same metric (PR AUC) on the same real validation folds, so their scores can be compared directly.
 
 ## Outputs
 
 ```
 results/gbm_feature_selection/
-├── summary.txt                     Short report of the whole run
-├── metrics.json                    Chosen set, best settings, CV and test scores, threshold
+├── summary.txt                     Short report of the selection
+├── selected_features.json          Kept features and test rows, read by modelling.py
 ├── selection_path.png              CV score for each number of features, forward and stepwise
+└── csv/
+    ├── feature_summary.csv         One row per feature: pre-screen SHAP, candidate / forward / stepwise / kept
+    ├── selection_comparison.csv    CV scores for all features, the candidates, forward and stepwise
+    ├── duplicates.csv              Dropped near-duplicates and the feature kept instead
+    ├── selection_path_forward.csv  CV score for each number of features
+    └── selection_path_stepwise.csv
+
+results/modelling/
+├── summary.txt                     Short report: SMOTE comparison, best settings, CV and test scores, threshold
+├── shap_beeswarm.png               SHAP plot of the kept features, for the report
 ├── roc_curve.png                   Test ROC curve
 ├── pr_curve.png                    Test precision-recall curve
 ├── confusion_matrix.png            Test confusion matrix
 └── csv/
-    ├── feature_summary.csv         One row per feature: candidate / forward / stepwise / kept, plus SHAP
-    ├── selection_comparison.csv    CV scores for all features, the candidates, forward and stepwise
-    ├── selection_path_forward.csv  CV score for each number of features
-    ├── selection_path_stepwise.csv
-    ├── predictions.csv             Test clients: true label, probability and prediction
     └── shap_summary.csv            SHAP results for the kept features
 ```
+
+### shap_beeswarm.png
+
+One row per kept feature, most important at the top. Each dot is a training client: its position is how much that feature pushes the client towards high risk (right) or low risk (left), in log-odds, and its color is the client's value of the feature (red = high, blue = low). For example, red dots on the right mean that high values increase the risk.
 
 ### shap_summary.csv
 
@@ -99,21 +133,20 @@ For example, if `mean_shap_above_avg` is 0.8, clients with above-average values 
 
 ## Use the results in a notebook
 
-From a notebook in `data_analysis/`:
+Don't import the scripts: importing one reruns it. Read the saved files instead. From a notebook in `data_analysis/`:
 
 ```python
-import sys
-sys.path.append("..")
-from src.gbm_feature_selection import load_results
+import pandas as pd
 
-metrics, tables = load_results("gbm_feature_selection")
-
-metrics["test_pr_auc"]
-tables["shap_summary"]   # every CSV in csv/ is in tables, by file name
+shap_summary = pd.read_csv("../results/modelling/csv/shap_summary.csv", index_col = 0)
 ```
+
+Every CSV in the `csv/` folders can be read the same way.
 
 ## Things to know
 
-- **The test scores are the honest ones.** The CV scores of the selected features are slightly too optimistic, because selection used the same folds.
-- **The fitted model isn't saved.** Running the script again with the same settings gives exactly the same model, because `SEED` fixes all the randomness.
-- **To change the model**, edit `SELECTION_MODEL`, `MODEL` and `PARAM_GRID`. It has to stay a tree-based model, because SHAP uses `TreeExplainer`.
+- **The test scores are the honest ones.** The CV scores are slightly too optimistic, because the features were picked and the model tuned on the same folds.
+- **The fitted model isn't saved.** Running the scripts again gives exactly the same model, because `SEED` fixes all the randomness.
+- **To change the model**, edit `small_gbm` in the selection, and the two GBMs in `approaches` and `param_grid` in `modelling.py`. It has to stay a tree-based model, because SHAP uses `TreeExplainer`. Keep the `"gbm"` step name, SHAP uses it to get the model out of the pipeline.
+- **SHAP explains real clients only.** It's computed on the GBM inside the pipeline, on the real training clients, not on the synthetic ones.
+- **A rare random crash on Windows.** About 1 run in 8, a script can stop with `BrokenProcessPool` / `WinError 6`. It comes from the parallel workers (`n_jobs = -1`), not from the code. Just rerun it.
