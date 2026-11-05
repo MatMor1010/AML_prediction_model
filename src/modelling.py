@@ -7,6 +7,7 @@ import pandas as pd
 import shap
 from imblearn.over_sampling import SMOTE, SMOTENC
 from imblearn.pipeline import Pipeline
+from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (ConfusionMatrixDisplay, PrecisionRecallDisplay, RocCurveDisplay,
@@ -14,6 +15,7 @@ from sklearn.metrics import (ConfusionMatrixDisplay, PrecisionRecallDisplay, Roc
                              precision_recall_fscore_support, roc_auc_score)
 from sklearn.model_selection import GridSearchCV, StratifiedKFold, cross_val_predict, cross_validate, train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_sample_weight
 
 SEED = 42
 
@@ -47,9 +49,9 @@ cv = StratifiedKFold(5, shuffle = True, random_state = SEED)
 scoring = {"roc_auc": "roc_auc", "pr_auc": "average_precision"}
 
 
-# 2. Tune the GBM without and with SMOTE, same features, folds and grid
+# 2. Tune the GBM 3 ways: plain, with class weights and with SMOTE, same features, folds and grid
 # No downsampling, we don't have a lot of data already
-print(f"Tuning on {len(final)} features, without and with SMOTE...")
+print(f"Tuning on {len(final)} features: plain, class weights and SMOTE...")
 
 # gbm__ = setting of the gbm step in the pipeline
 param_grid = {"gbm__n_estimators": [100, 200, 400],
@@ -57,6 +59,9 @@ param_grid = {"gbm__n_estimators": [100, 200, 400],
               "gbm__max_depth": [2, 3, 4],
               "gbm__subsample": [0.8, 1.0],
               "gbm__min_samples_leaf": [1, 2, 5, 10]}
+
+# Class weights: a high-risk client counts about twice in the fit, so both classes weigh the same
+weights = compute_sample_weight("balanced", y_train)
 
 # SMOTE creates new 1 between real ones until both classes are the same size
 # I use SMOTENC to keep the binary features at 0 or 1, plain SMOTE if there are none
@@ -68,15 +73,19 @@ smote = SMOTENC(categorical_features = binary, random_state = SEED) if binary el
 scaler = StandardScaler().set_output(transform = "pandas")
 
 # The pipeline is only fitted on the training folds, never on validation or test
-approaches = {"no_smote": Pipeline([("scaler", scaler), ("gbm", GradientBoostingClassifier(random_state = SEED))]),
-              "smote": Pipeline([("scaler", scaler), ("smote", smote),
-                                 ("gbm", GradientBoostingClassifier(random_state = SEED))])}
+plain = Pipeline([("scaler", scaler), ("gbm", GradientBoostingClassifier(random_state = SEED))])
+with_smote = Pipeline([("scaler", scaler), ("smote", smote), ("gbm", GradientBoostingClassifier(random_state = SEED))])
+
+# Pipeline and what goes in fit(), the weights get cut along the folds like the data
+approaches = {"plain": (plain, {}),
+              "weights": (plain, {"gbm__sample_weight": weights}),
+              "smote": (with_smote, {})}
 
 grids = {}
 rows = []
-for name, pipeline in approaches.items():
+for name, (pipeline, fit_params) in approaches.items():
     grid = GridSearchCV(pipeline, param_grid, cv = cv, scoring = scoring, refit = "pr_auc", n_jobs = -1)
-    grid.fit(X_train[final], y_train)
+    grid.fit(X_train[final], y_train, **fit_params)
     grids[name] = grid
 
     i = grid.best_index_
@@ -88,12 +97,14 @@ for name, pipeline in approaches.items():
 
 approach_comparison = pd.DataFrame(rows).set_index("approach")
 
-# SMOTE only wins if it's better by more than one standard error
+# Weights or SMOTE only win if they beat plain by more than one standard error
 approach_score = approach_comparison["cv_pr_auc_mean"]
-smote_gain = approach_score["smote"] - approach_score["no_smote"]
-smote_se = approach_comparison.loc["no_smote", "cv_pr_auc_std"] / np.sqrt(5)
+rebalanced = approach_score.drop("plain").idxmax()
+rebalance_gain = approach_score[rebalanced] - approach_score["plain"]
+plain_se = approach_comparison.loc["plain", "cv_pr_auc_std"] / np.sqrt(5)
 
-approach = "smote" if smote_gain > smote_se else "no_smote"
+approach = rebalanced if rebalance_gain > plain_se else "plain"
+fit_params = approaches[approach][1]
 
 grid = grids[approach]
 model = grid.best_estimator_
@@ -105,7 +116,8 @@ best_params = {key.replace("gbm__", ""): value for key, value in grid.best_param
 
 # 3. Threshold to turn the probability into high risk or not
 # Chosen on out-of-fold train predictions, the test set stays untouched
-oof_prob = cross_val_predict(model, X_train[final], y_train, cv = cv, method = "predict_proba", n_jobs = -1)[:, 1]
+oof_prob = cross_val_predict(model, X_train[final], y_train, cv = cv, method = "predict_proba", n_jobs = -1,
+                             params = fit_params)[:, 1]
 oof_precision, oof_recall, thresholds = precision_recall_curve(y_train, oof_prob)
 
 # The last precision / recall point has no threshold
@@ -130,14 +142,16 @@ threshold = thresholds[np.argmin(costs)]
 test_prob = model.predict_proba(X_test[final])[:, 1]
 test_pred = (test_prob >= threshold).astype(int)
 
-# Same cost on test for both thresholds, to see if the cost one beats F1
-test_cost = {}
-for name, t in [("cost", threshold), ("f1", threshold_f1)]:
-    tn, fp, fn, tp = confusion_matrix(y_test, (test_prob >= t).astype(int), labels = [0, 1]).ravel()
-    test_cost[name] = {"threshold": t, "caught": tp, "missed": fn, "false_alarms": fp,
-                       "flagged": (test_prob >= t).mean(), "cost": COST_FN * fn + fp}
+# Both thresholds on train (out-of-fold) and test, to see if the cost one beats F1
+threshold_check = {}
+for data, truth, prob in [("train_oof", y_train, oof_prob), ("test", y_test, test_prob)]:
+    for name, t in [("cost", threshold), ("f1", threshold_f1)]:
+        tn, fp, fn, tp = confusion_matrix(truth, (prob >= t).astype(int), labels = [0, 1]).ravel()
+        threshold_check[(data, name)] = {"threshold": t, "caught": tp, "missed": fn, "false_alarms": fp,
+                                         "recall": tp / (tp + fn), "precision": tp / (tp + fp),
+                                         "flagged": (prob >= t).mean(), "cost": COST_FN * fn + fp}
 
-test_cost = pd.DataFrame(test_cost).T.astype({"caught": int, "missed": int, "false_alarms": int, "cost": int})
+threshold_check = pd.DataFrame(threshold_check).T.astype({"caught": int, "missed": int, "false_alarms": int, "cost": int})
 
 precision, recall, f1, _ = precision_recall_fscore_support(y_test, test_pred, average = "binary",
                                                            zero_division = 0)
@@ -162,7 +176,31 @@ benchmark = pd.DataFrame({"cv_roc_auc": [cv_final["cv_roc_auc_mean"], logit_cv["
                          index = ["gbm", "logistic_regression"])
 
 
-# 5. SHAP on the GBM (in log-odds), it needs the scaled data like in training
+# 5. Drop each kept feature once (same settings and folds): how much does the model need it?
+# Handy to check an odd feature, or one the model leans on too much
+drop_rows = []
+for col in final:
+    cols = [c for c in final if c != col]
+    check = clone(model)
+
+    # SMOTENC has to know which binary features are left
+    if approach == "smote":
+        binary_left = [c for c in binary if c != col]
+        check.set_params(smote = SMOTENC(categorical_features = binary_left, random_state = SEED) if binary_left
+                         else SMOTE(random_state = SEED))
+
+    drop_scores = cross_validate(check, X_train[cols], y_train, cv = cv, scoring = scoring, params = fit_params,
+                                 n_jobs = -1)
+    drop_rows.append({"dropped": col,
+                      "cv_roc_auc": drop_scores["test_roc_auc"].mean(),
+                      "cv_pr_auc": drop_scores["test_pr_auc"].mean()})
+
+drop_one = pd.DataFrame(drop_rows).set_index("dropped")
+drop_one["pr_auc_change"] = drop_one["cv_pr_auc"] - cv_final["cv_pr_auc_mean"]
+drop_one = drop_one.sort_values("pr_auc_change")
+
+
+# 6. SHAP on the GBM (in log-odds), it needs the scaled data like in training
 X_train_scaled = model["scaler"].transform(X_train[final])
 explanation = shap.TreeExplainer(model["gbm"])(X_train_scaled)
 shap_values = pd.DataFrame(explanation.values, index = X_train.index, columns = final)
@@ -184,8 +222,9 @@ shap_summary["mean_shap_below_avg"] = shap_values.where(~above_avg).mean()
 shap_summary = shap_summary.sort_values("mean_abs_shap", ascending = False)
 
 
-# Export the SHAP table
+# Export the tables
 shap_summary.to_csv(out + "csv/shap_summary.csv")
+drop_one.to_csv(out + "csv/drop_one.csv")
 
 
 # SHAP beeswarm for the report, colored with the real feature values
@@ -221,8 +260,8 @@ Features: {len(final)} kept by gbm_feature_selection.py ({selection['chosen_set'
 Approaches compared with the tuned GBM (CV on train):
 {approach_comparison.round(4).to_string()}
 
-Chosen: {approach}, SMOTE gain in pr_auc {smote_gain:+.4f}, one standard error {smote_se:.4f}
-(SMOTE only wins if its gain is more than one standard error)
+Chosen: {approach}, best rebalancing ({rebalanced}) gain in pr_auc {rebalance_gain:+.4f}, one standard error {plain_se:.4f}
+(weights or SMOTE only win if the gain is more than one standard error)
 
 Best params: {best_params}
 
@@ -234,11 +273,14 @@ Benchmark, same features and folds:
 
 At threshold {threshold:.3f} (lowest train cost, a missed 1 = {COST_FN} false alarms), on test: precision {precision:.3f}, recall {recall:.3f}, F1 {f1:.3f}
 
-Cost threshold vs best F1 threshold, both chosen on train, compared on test (cost = {COST_FN} x missed + false alarms):
-{test_cost.round(3).to_string()}
+Cost threshold vs best F1 threshold, both chosen on train out-of-fold predictions (cost = {COST_FN} x missed + false alarms):
+{threshold_check.round(3).to_string()}
 
 Test confusion matrix:
 {confusion.to_string()}
+
+Drop one feature at a time (same settings, CV on train), pr_auc change vs the full model:
+{drop_one.round(4).to_string()}
 
 Kept features (SHAP in log-odds; + means higher values push towards high risk):
 {shap_summary.round(3).to_string()}
