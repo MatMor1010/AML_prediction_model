@@ -4,6 +4,7 @@ Without duplicates:    62 (of 145)
 Chosen by forward:     6
 Chosen by stepwise:    8
 Kept:                  8 (stepwise, best CV pr_auc)
+
 Feature sets compared with the small GBM (CV on train):
             n_features  roc_auc_mean  roc_auc_std  pr_auc_mean  pr_auc_std
 set                                                                       
@@ -11,6 +12,7 @@ all                 62        0.8191       0.0515       0.7107      0.0723
 candidates          50        0.8195       0.0519       0.7009      0.0703
 forward              6        0.8182       0.0212       0.7368      0.0666
 stepwise             8        0.8351       0.0337       0.7448      0.0854
+
 Kept features (pre-screen mean |SHAP|):
 feature
 in_person_visit_cnt                0.5249

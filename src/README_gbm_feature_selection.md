@@ -3,7 +3,7 @@
 Two scripts, run one after the other:
 
 1. `src/gbm_feature_selection.py` picks a small set of features for the AML risk model and saves them to `results/gbm_feature_selection/`.
-2. `src/modelling.py` trains a gradient boosting model (GBM) on those features, with and without SMOTE, keeps the better one, checks it on clients it has never seen, and saves everything to `results/modelling/`.
+2. `src/modelling.py` trains a gradient boosting model (GBM) on those features three ways (plain, with class weights, with SMOTE), keeps the best one, checks it on clients it has never seen, and saves everything to `results/modelling/`.
 
 ## Run it
 
@@ -27,8 +27,8 @@ Both scripts read top to bottom like `Data_transformation.py`, and the values ar
 | The small model used to pick features | `small_gbm`, `gbm_feature_selection.py` |
 | How many features go into selection (50) | `shap_rank.index[:50]`, step 2 of `gbm_feature_selection.py` |
 | The final model's tuning grid | `param_grid`, step 2 of `modelling.py` (keep the `gbm__` in front of each setting) |
-| The SMOTE rule (only wins if more than one standard error better) | `approach = ...`, step 2 of `modelling.py` |
-| The threshold rule (best F1) | Step 3 of `modelling.py`. The comment shows how to catch at least 80% of high-risk clients instead |
+| The rebalancing rule (weights or SMOTE only win if more than one standard error better) | `approach = ...`, step 2 of `modelling.py` |
+| The threshold rule (lowest cost, a missed high-risk client costs as much as 4 false alarms) | `COST_FN`, step 3 of `modelling.py` |
 
 Every column except `rating` is a feature. If you add or remove columns in `Data_transformation.py`, both scripts and all their outputs adapt on their own.
 
@@ -40,7 +40,7 @@ On the current data:
 
 ```
 gbm_feature_selection.py:  145 features  →  drop near-duplicates  →  62  →  pre-screen  →  50 candidates  →  forward / stepwise  →  kept features
-modelling.py:              kept features  →  tune without / with SMOTE  →  threshold  →  test  →  SHAP
+modelling.py:              kept features  →  tune plain / weights / SMOTE  →  threshold  →  test  →  drop-one check  →  SHAP
 ```
 
 **Both scripts.** 20% of clients are set aside as a test set. Both scripts make the same split (same `SEED`), so the selection never sees the test clients. Everything else uses 5-fold cross-validation (CV) on the other 80%, with the same folds in both scripts.
@@ -59,10 +59,11 @@ modelling.py:              kept features  →  tune without / with SMOTE  →  t
 `modelling.py`:
 
 1. **Load.** The data, the kept features, and the same split. It checks that the test set is the same one the selection never saw.
-2. **Tune, without and with SMOTE.** The model is tuned on the kept features by trying every combination in `param_grid` (216 combinations × 5 folds). This is done twice, with the same features, folds and grid, so the only difference is SMOTE (see below). SMOTE only wins if it beats the plain model by more than one standard error, otherwise the simpler model is kept.
-3. **Choose the threshold.** The model gives a probability, and the threshold turns it into high risk yes or no. It's chosen on the training data only, never on the test set. This also handles SMOTE: a model trained on 50/50 data gives higher probabilities, and the threshold is picked on that same model.
-4. **Test.** The final model is scored once on the test set: ROC AUC, PR AUC, precision, recall, F1 and a confusion matrix.
-5. **Explain.** SHAP shows how much each kept feature pushes each client towards high or low risk. The results are summarized in `shap_summary.csv`.
+2. **Tune three ways: plain, class weights, SMOTE.** The model is tuned on the kept features by trying every combination in `param_grid` (216 combinations × 5 folds). This is done three times, with the same features, folds and grid, so the only difference is how the imbalance is handled (see below). Weights or SMOTE only win if they beat the plain model by more than one standard error, otherwise the simpler model is kept.
+3. **Choose the threshold.** The model gives a probability, and the threshold turns it into high risk yes or no. It's chosen on out-of-fold predictions of the training data, never on the test set: the threshold with the lowest cost, where a missed high-risk client costs `COST_FN` = 4 and a false alarm costs 1. The best-F1 threshold is also computed, just to compare. Picking the threshold on the same model also handles rebalancing: a model trained on 50/50 data gives higher probabilities.
+4. **Test.** The final model is scored once on the test set: ROC AUC, PR AUC, precision, recall, F1 and a confusion matrix. A logistic regression on the same features and folds is the benchmark.
+5. **Drop-one check.** The tuned model is refitted on the training folds without each kept feature in turn, with the same settings. The drop in CV PR AUC shows how much the model needs that feature. It's useful for a feature with an odd direction, or one the model leans on a lot.
+6. **Explain.** SHAP shows how much each kept feature pushes each client towards high or low risk. The results are summarized in `shap_summary.csv`.
 
 ## Why a smaller model is used for selection
 
@@ -77,17 +78,21 @@ The pre-screen uses the same idea. One fit of the small model ranks all 62 remai
 
 The trade-off: the features chosen are the best ones *for the small model*. The tuned model might have preferred slightly different ones.
 
-## SMOTE
+## Class weights and SMOTE
 
-About a third of clients are high risk. SMOTE creates synthetic high-risk clients by picking a real one and placing a new point between it and one of its nearest high-risk neighbours, until both classes are the same size. Only high-risk clients are added; the others are left as they are. There's no downsampling, because with 588 clients we can't afford to throw any away.
+About a third of clients are high risk. Two ways to rebalance are tested against the plain model. There's no downsampling, because with 588 clients we can't afford to throw any away.
 
-Three things make the comparison fair:
+**Class weights.** Each training client gets a weight, `"balanced"`: a high-risk client counts about twice as much as a non-high one in the fit, so both classes weigh the same. `GridSearchCV` cuts the weights along the folds like the data, and the validation folds are scored without weights.
+
+**SMOTE.** SMOTE creates synthetic high-risk clients by picking a real one and placing a new point between it and one of its nearest high-risk neighbours, until both classes are the same size. Only high-risk clients are added; the others are left as they are.
+
+Three things make the SMOTE comparison fair:
 
 - **SMOTE only touches the training folds.** It sits inside an `imblearn` `Pipeline`, so in every CV split it upsamples the 4 training folds only. The validation fold, and later the test set, contain real clients only. Upsampling before the split would put copies of the same clients on both sides and make the scores look better than they are.
 - **Binary features stay binary.** Plain SMOTE would give values like `prod_ted = 0.37`. `SMOTENC` takes the most common value among the neighbours for the binary features (any feature with exactly 2 values).
-- **Selection is done once, without SMOTE.** Both approaches are tuned on the same kept features, so the comparison is only about SMOTE.
+- **Selection is done once, without SMOTE.** All approaches are tuned on the same kept features, so the comparison is only about the rebalancing.
 
-Both approaches are scored with the same metric (PR AUC) on the same real validation folds, so their scores can be compared directly.
+All three approaches are scored with the same metric (PR AUC) on the same real validation folds, so their scores can be compared directly.
 
 ## Outputs
 
@@ -104,13 +109,15 @@ results/gbm_feature_selection/
     └── selection_path_stepwise.csv
 
 results/modelling/
-├── summary.txt                     Short report: SMOTE comparison, best settings, CV and test scores, threshold
+├── summary.txt                     Short report: rebalancing comparison, best settings, CV and test scores,
+│                                   benchmark, thresholds, drop-one check, SHAP
 ├── shap_beeswarm.png               SHAP plot of the kept features, for the report
 ├── roc_curve.png                   Test ROC curve
 ├── pr_curve.png                    Test precision-recall curve
 ├── confusion_matrix.png            Test confusion matrix
 └── csv/
-    └── shap_summary.csv            SHAP results for the kept features
+    ├── shap_summary.csv            SHAP results for the kept features
+    └── drop_one.csv                CV scores without each kept feature
 ```
 
 ### shap_beeswarm.png
