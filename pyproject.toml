@@ -3,9 +3,16 @@ name = "aml-prediction-model"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "imbalanced-learn>=0.14.2",
     "ipykernel>=7.4.0",
+    "joblib>=1.6.0",
+    "kaleido>=1.5.0",
+    "matplotlib>=3.11.2",
+    "mlxtend>=0.25.0",
     "nbformat>=5.11.1",
     "openpyxl>=3.1.5",
     "pandas>=3.1.0",
     "plotly>=7.1.0",
+    "scikit-learn>=1.9.1",
+    "shap>=0.54.1",
 ]

@@ -1,0 +1,37 @@
+Data: AML_data_transformed.pkl, 588 rows
+Train/test rows: 470/118, positive rate 33.7%
+Features: 8 kept by gbm_feature_selection.py (stepwise)
+Approaches compared with the tuned GBM (CV on train):
+          cv_roc_auc_mean  cv_roc_auc_std  cv_pr_auc_mean  cv_pr_auc_std
+approach                                                                
+no_smote            0.837          0.0391          0.7328         0.0919
+smote               0.823          0.0416          0.7163         0.0931
+Chosen: no_smote, SMOTE gain in pr_auc -0.0165, one standard error 0.0411
+(SMOTE only wins if its gain is more than one standard error)
+Best params: {'learning_rate': 0.03, 'max_depth': 3, 'min_samples_leaf': 1, 'n_estimators': 200, 'subsample': 0.8}
+Final model (no_smote):
+         cv_mean  cv_std   test
+roc_auc    0.837   0.039  0.824
+pr_auc     0.733   0.092  0.742
+At threshold 0.159 (lowest train cost, a missed 1 = 4 false alarms), on test: precision 0.500, recall 0.825, F1 0.623
+Cost threshold vs best F1 threshold, both chosen on train, compared on test (cost = 4 x missed + false alarms):
+      threshold  caught  missed  false_alarms  flagged  cost
+cost      0.159      33       7            33    0.559    61
+f1        0.467      22      18             7    0.246    79
+Test confusion matrix:
+        pred_0  pred_1
+true_0      45      33
+true_1       7      33
+Kept features (SHAP in log-odds; + means higher values push towards high risk):
+                                 mean_abs_shap  share_of_total direction  mean_shap_above_avg  mean_shap_below_avg
+feature                                                                                                           
+in_person_visit_cnt                      0.563           0.237         +                0.742               -0.350
+avg_cash_5m                              0.466           0.196         +                0.579               -0.159
+tot_cross_border_val_12m                 0.415           0.175         +                1.452               -0.149
+txn_cash_out_cnt_3m                      0.382           0.161         -               -0.487                0.306
+prod_cda                                 0.185           0.078         +                0.145               -0.238
+geo_mail_addr_country_rate_high          0.168           0.071         +                2.074               -0.088
+prod_total_acct_cnt                      0.158           0.066         +                0.106               -0.048
+txn_wires_in_high_cnt_12m                0.040           0.017         +                0.171               -0.016
+Note: CV scores are slightly optimistic because the features were picked on the same folds;
+the test scores are the honest numbers.

@@ -11,6 +11,10 @@
 \usepackage{pdfpages}
 \tcbuselibrary{breakable}
 
+% Let long variable names break after an underscore
+\renewcommand{\_}{\textunderscore\allowbreak}
+\setlength{\emergencystretch}{2em}
+
 % Grey box for the question statements
 \newtcolorbox{question}{
     breakable,
@@ -33,9 +37,252 @@
 
 \input{Latex_lib/presentation_page}
 
-\section*{}
+\section*{Question 1:}
 
+\begin{question}
+Is it necessary to transform the data, and why? If yes, how do you transform?
+\end{question}
 
+The data has 588 clients and 152 columns: the client ID, the target \texttt{rating} and 150 features. There are no missing values and no duplicated IDs, and all the features were already standardized.
 
+For the model, a transformation is not really necessary. We use gradient boosting, which is based on decision trees, and a tree only uses the order of the values to make its splits, so we get the same model whether the data is standardized or not. We still transformed the data (\texttt{Data\_transformation.py}) to clean it and to be able to read and explain the results in real units:
+\begin{enumerate}[nosep]
+    \item We dropped the client ID, since it is unique for every client.
+    \item We dropped exact copies. \texttt{tot\_acct\_num} and \texttt{tot\_acct\_num.1} are the same as \texttt{prod\_prim\_acct\_cnt}, and in this data the three \texttt{geo\_domicile\_country\_rate\_*} columns are the same as the \texttt{geo\_mail\_addr\_country\_rate\_*} ones. This leaves 145 features.
+    \item The 13 binary indicators were also standardized (\texttt{cust\_cdn\_resident} takes the values 0.23 and $-4.31$), so we put them back to 0 and 1.
+    \item The 48 counts (\texttt{\_cnt}, \texttt{\_num}) became decimals too. A count takes evenly spaced values, so we got the whole numbers back with $(z - z_{\min})/\Delta$, where $\Delta$ is the smallest gap between two values. We checked it with totals that have to add up, for example \texttt{prod\_total\_acct\_cnt} $=$ \texttt{prod\_prim\_acct\_cnt} $+$ \texttt{prod\_none\_prim\_acct\_cnt}, and it holds for all 588 clients.
+    \item The 84 amounts and balances stay standardized. Their original scale cannot be recovered, and the model does not need it.
+\end{enumerate}
+
+The scale only matters for SMOTE (Question 3), because it uses distances between clients. For that step, we standardize the features again inside the pipeline, using the training folds only.
+
+\clearpage
+\section*{Question 2:}
+
+\begin{question}
+Is it necessary to do feature selection, and why? If your answer is yes, what techniques do you use and why? (what problems do these techniques address?)
+\end{question}
+
+Yes. We have 145 features for only 470 training clients, so the model can easily learn noise. Many features also carry the same information over 3, 6 or 12 months, or as a count and as an amount. And a risk rating model has to be explained to compliance, which is a lot easier with a few features. Here, fewer features even gave a better model: the CV PR AUC goes from 0.711 with all the features to 0.745 with the 8 we kept.
+
+The whole selection is done on the training set (\texttt{gbm\_feature\_selection.py}):
+\begin{enumerate}[nosep]
+    \item \textit{Near-duplicates.} When two features have a Spearman correlation of 0.95 or more, we keep the one that best predicts the rating on its own (AUC). This removes 83 features (145 to 62). Otherwise the selection picks one twin or the other at random, and the importance gets split between them.
+    \item \textit{SHAP pre-screen.} We fit a small GBM on the 62 features and keep the 50 with the highest mean $|$SHAP$|$. It mainly makes the next step faster, and unlike a simple correlation filter it takes interactions into account.
+    \item \textit{Forward and stepwise selection.} Both add, one at a time, the feature that improves the 5-fold CV PR AUC the most. Stepwise can also remove a feature that became useless, which corrects the greedy side of forward selection. Since the features are judged together, we end up with features that work well as a group. During this step we use a small GBM with fixed settings (100 trees of depth 2): it is fast, and the score only changes because of the features.
+    \item \textit{One-standard-error rule.} After about 6 features the score barely moves (Figure~\ref{fig:selection}), so instead of the best set we keep the smallest one within one standard error of the best score.
+\end{enumerate}
+
+We use the PR AUC because only a third of the clients are high risk. Forward keeps 6 features and stepwise 8, and we keep the stepwise set since it scores better:
+
+\begin{center}
+\begin{tabular}{lccc}
+    \hline
+    Feature set & Features & CV ROC AUC & CV PR AUC \\
+    \hline
+    After removing near-duplicates & 62 & 0.819 & 0.711 \\
+    SHAP candidates & 50 & 0.820 & 0.701 \\
+    Forward selection & 6 & 0.818 & 0.737 \\
+    \textbf{Stepwise selection (kept)} & \textbf{8} & \textbf{0.835} & \textbf{0.745} \\
+    \hline
+\end{tabular}
+\end{center}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.6\linewidth]{../results/gbm_feature_selection/selection_path.png}
+    \caption{CV PR AUC by number of features ($\pm$ one standard deviation). The dashed lines are the number of features kept.}
+    \label{fig:selection}
+\end{figure}
+
+The 8 features make sense for AML: cash and branch activity (\texttt{in\_person\_visit\_cnt}, \texttt{avg\_cash\_5m}, \texttt{txn\_cash\_out\_cnt\_3m}), cross-border wires (\texttt{tot\_cross\_border\_val\_12m}), high-risk countries (\texttt{geo\_mail\_addr\_country\_rate\_high}, \texttt{txn\_wires\_in\_high\_cnt\_12m}) and products (\texttt{prod\_cda}, \texttt{prod\_total\_acct\_cnt}). Our EDA also shows clear trends with the rating (Figure~\ref{fig:eda}): 84\% of the clients with a mailing address in a high-risk country are high risk against 31\% for the others, 81\% of the clients with the largest cross-border amounts against 29\%, and the share goes from 31\% to 52\% with more in-person visits.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.45\linewidth]{../results/eda/in_person_visit_cnt.png}
+    \hfill
+    \includegraphics[width=0.45\linewidth]{../results/eda/avg_cash_5m.png}\\[4pt]
+    \includegraphics[width=0.45\linewidth]{../results/eda/tot_cross_border_val_12m.png}
+    \hfill
+    \includegraphics[width=0.45\linewidth]{../results/eda/geo_mail_addr_country_rate_high.png}
+    \caption{EDA of four selected features: number of clients (bars) and share of high-risk clients (line) in each group. \texttt{avg\_cash\_5m} and \texttt{tot\_cross\_border\_val\_12m} are still standardized.}
+    \label{fig:eda}
+\end{figure}
+
+\clearpage
+\section*{Question 3:}
+
+\begin{question}
+How do you split the data into training and testing dataset? Do you consider sample weight, and why?
+\end{question}
+
+We split the data at random, 80\% for training (470 clients, 158 high risk) and 20\% for testing (118 clients, 40 high risk). The split is stratified on the rating, so both sets keep 33.7\% of high-risk clients, which matters with so few clients. There is no date in the data and each client appears only once, so a random split works and no client ends up in both sets.
+
+The test set is only used once, at the very end. Everything that learns from the data (duplicates, selection, tuning, SMOTE, scaling and the threshold) uses the training set with a 5-fold stratified cross-validation. Both scripts make the same split, and \texttt{modelling.py} checks that the test clients are the same.
+
+For sample weights, the classes are a bit imbalanced, with about one high-risk client for two others. We tested rebalancing the training data with SMOTE, which creates synthetic high-risk clients between real ones. It runs inside the cross-validation, so only the training folds get synthetic clients, and we used SMOTENC so the binary features stay 0 or 1. Both versions were tuned with the same features, folds and grid:
+
+\begin{center}
+\begin{tabular}{lcc}
+    \hline
+    & CV ROC AUC & CV PR AUC \\
+    \hline
+    Without SMOTE & 0.837 & 0.733 \\
+    With SMOTE & 0.823 & 0.716 \\
+    \hline
+\end{tabular}
+\end{center}
+
+SMOTE does slightly worse, so we did not reweight the classes. With a 1 to 2 ratio the imbalance is mild, and reweighting mostly pushes the probabilities up without ranking the clients better. The higher cost of missing a high-risk client is handled with the threshold instead (Question 4).
+
+Also, 33.7\% of high-risk clients is much more than in a normal bank portfolio, so the sample was probably enriched with high-risk clients. We do not know the real proportions, so we cannot weight for it, but the probabilities and the threshold would need to be recalibrated on the real population before using the model.
+
+\clearpage
+\section*{Question 4:}
+
+\begin{question}
+What model do you choose? What're the hyperparameters in the model (if any), and how do you decide the values of them? How do you cut the threshold for high and non-high.
+\end{question}
+
+We use a gradient boosting classifier (scikit-learn). It adds small decision trees one after the other, each one correcting the errors of the previous ones, and outputs the probability that a client is high risk. We chose it because it captures non-linear effects and interactions by itself, it is not bothered by the scale or the very skewed features (81\% of the clients have no cross-border wire), it works well on small tabular data, and it can be explained with SHAP. It also clearly beats a logistic regression on the same 8 features, with a CV PR AUC of 0.733 against 0.652.
+
+\begin{center}
+\begin{tabular}{llcc}
+    \hline
+    Hyperparameter & Role & Values tested & Chosen \\
+    \hline
+    \texttt{n\_estimators} & number of trees & 100, 200, 400 & 200 \\
+    \texttt{learning\_rate} & weight of each new tree & 0.01, 0.03, 0.1 & 0.03 \\
+    \texttt{max\_depth} & depth of each tree & 2, 3, 4 & 3 \\
+    \texttt{subsample} & share of clients used for each tree & 0.8, 1.0 & 0.8 \\
+    \texttt{min\_samples\_leaf} & minimum number of clients in a leaf & 1, 2, 5, 10 & 1 \\
+    \hline
+\end{tabular}
+\end{center}
+
+We tuned the hyperparameters with a grid search: each of the 216 combinations is tested with the same 5-fold stratified CV on the training set, and we keep the one with the best mean PR AUC. Our first grid was smaller and its best values were on the edge, so we widened it. The final model is fairly regularized, with a small learning rate, trees of depth 3 and 80\% of the clients used for each tree.
+
+A client is rated high when its probability is above the threshold. We chose it on the training set using out-of-fold predictions, so each client is scored by a model that never saw it. For each possible threshold we build the confusion matrix and compute
+\[
+    \text{cost} = 4 \times \text{missed high-risk clients} + \text{false alarms},
+\]
+because in AML, missing a high-risk client is much worse than doing one extra review. The cost is lowest at a threshold of \textbf{0.159}. On the training folds, it catches 87\% of the high-risk clients with a precision of 0.53, and rates 55\% of the clients as high. The threshold that maximizes the F1 score (0.467) would only catch 70\% of them. The ratio of 4 is our own assumption; in practice it should be set with compliance, depending on how many reviews the team can handle.
+
+\clearpage
+\section*{Question 5:}
+
+\begin{question}
+How do you evaluate the performance of your model? Hint: you can evaluate on the model score (e.g., ROC AUC) or on the model-predicted label (e.g., precision, recall, F1 score)
+\end{question}
+
+We look at both the score and the predicted labels, with 5-fold CV during development and then once on the test set at the end.
+
+For the score, we use the ROC AUC and the PR AUC. The ROC AUC is the probability that a high-risk client gets a higher score than a non-high one (0.5 is random). The PR AUC focuses on how well the high-risk clients are found, and a random model gets their share, 0.34. It is our main metric.
+
+\begin{center}
+\small
+\begin{tabular}{lcccc}
+    \hline
+    & \multicolumn{2}{c}{ROC AUC} & \multicolumn{2}{c}{PR AUC} \\
+    Model & CV (mean $\pm$ std) & Test & CV (mean $\pm$ std) & Test \\
+    \hline
+    \textbf{GBM (ours)} & $\mathbf{0.837 \pm 0.039}$ & \textbf{0.824} & $\mathbf{0.733 \pm 0.092}$ & \textbf{0.742} \\
+    Logistic regression, same features & $0.775 \pm 0.055$ & 0.745 & $0.652 \pm 0.085$ & 0.668 \\
+    Random & 0.500 & 0.500 & 0.337 & 0.339 \\
+    \hline
+\end{tabular}
+\end{center}
+
+The test scores are within the range of the CV scores, so there is no sign of overfitting, and the PR AUC is more than twice the random level (Figure~\ref{fig:curves}).
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.42\linewidth]{../results/modelling/roc_curve.png}
+    \hfill
+    \includegraphics[width=0.42\linewidth]{../results/modelling/pr_curve.png}
+    \caption{ROC curve (left) and precision-recall curve (right) on the test set.}
+    \label{fig:curves}
+\end{figure}
+
+For the labels, with our threshold of 0.159 the test confusion matrix is:
+
+\begin{center}
+\begin{tabular}{lcc}
+    \hline
+    & Predicted non-high & Predicted high \\
+    \hline
+    True non-high & 45 & 33 \\
+    True high & 7 & 33 \\
+    \hline
+\end{tabular}
+\end{center}
+
+We catch 33 of the 40 high-risk clients (recall of 0.825) with a precision of 0.50 and an F1 of 0.62. With the F1 threshold we would only catch 22 of them (recall 0.55, precision 0.76, F1 0.64). Our cost is 61 against 79, so the threshold chosen on the training set also works better on new clients. The F1 is a bit lower, which is expected since we trade some precision for recall on purpose.
+
+Keep in mind that the test set is small (40 high-risk clients), so these numbers can move by a few points, and that the CV scores are slightly optimistic because the same folds were used for the selection and the tuning.
+
+\clearpage
+\section*{Question 6:}
+
+\begin{question}
+How do you interpret the model? Which are the important features, and how they drive the model outcome. Is there any feature with counter-intuitive behavior? For example, higher risk occupation should indicate higher client risk rating, but the data or trained model might indicate the opposite. Can you think of a reason for this kind of problem, and how do you address it?
+\end{question}
+
+We use SHAP values on the training clients. For each client, SHAP splits the prediction (in log-odds) into the contribution of each feature, a positive value pushing towards high risk. The importance of a feature is its mean absolute SHAP value (Figure~\ref{fig:shap}).
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\linewidth]{../results/modelling/shap_beeswarm.png}
+    \caption{SHAP values of the 8 features. Each dot is a client, red is a high value of the feature and blue a low one. Dots on the right push towards high risk.}
+    \label{fig:shap}
+\end{figure}
+
+\begin{center}
+\small
+\begin{tabular}{lcl}
+    \hline
+    Feature & Importance & Higher value $\rightarrow$ risk \\
+    \hline
+    \texttt{in\_person\_visit\_cnt} & 24\% & higher \\
+    \texttt{avg\_cash\_5m} & 20\% & higher \\
+    \texttt{tot\_cross\_border\_val\_12m} & 18\% & much higher \\
+    \texttt{txn\_cash\_out\_cnt\_3m} & 16\% & \textbf{lower} \\
+    \texttt{prod\_cda} (chequing account) & 8\% & slightly higher \\
+    \texttt{geo\_mail\_addr\_country\_rate\_high} & 7\% & much higher \\
+    \texttt{prod\_total\_acct\_cnt} & 7\% & slightly higher \\
+    \texttt{txn\_wires\_in\_high\_cnt\_12m} & 2\% & higher \\
+    \hline
+\end{tabular}
+\end{center}
+
+The model mostly relies on the usual AML red flags. Cash comes first: clients who often come to the branch and use large amounts of cash are riskier ($+0.74$ in log-odds for an above-average number of visits, around $-0.8$ with no visit at all). Then cross-border wires: most clients have none, but large cross-border amounts push the risk up a lot ($+1.45$). A mailing address in a high-risk country is rare (4\% of the clients) but gives the strongest single push, $+2.07$. Having a chequing account and more accounts adds a little risk.
+
+The counter-intuitive feature is \texttt{txn\_cash\_out\_cnt\_3m}: more cash withdrawals push towards lower risk ($-0.49$ for above-average values), while we would expect heavy cash use to be risky. The data already goes slightly in that direction, since the share of high-risk clients falls from 34\% to 29\% as withdrawals increase (Figure~\ref{fig:withdrawals}), and the model makes it stronger. We think the reason is its correlation with \texttt{avg\_cash\_5m} (0.64) and with the visits (0.56). The model reads the withdrawals with the cash amounts and the visits held fixed, and for the same cash activity, many withdrawals means many small everyday withdrawals, which looks like a normal retail client. Risky clients tend to move cash in fewer but bigger transactions. With only 470 training clients, part of it can also be specific to this sample. \texttt{txn\_wires\_in\_high\_cnt\_12m} does the same for a few clients, as it overlaps with the cross-border amount (0.65).
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.5\linewidth]{../results/eda/txn_cash_out_cnt_3m.png}
+    \caption{Share of high-risk clients by number of cash withdrawals (note the zoomed right axis: it only goes from 34\% to 29\%).}
+    \label{fig:withdrawals}
+\end{figure}
+
+We kept the feature, since both forward and stepwise selected it and the effect has a reasonable explanation, but we would flag it to model validation. To fix it, we could replace the withdrawal count and the average cash amount by a single feature that is easier to interpret, the average withdrawal size, or force the model to be monotonic in cash use, and then check how much performance we lose.
+
+\clearpage
+\section*{Question 7:}
+
+\begin{question}
+Are there any other issues you observe or actions you take to address potential issues while train the model? If yes, please describe them, and state the reason and solution.
+\end{question}
+
+A few other issues came up:
+\begin{itemize}[nosep]
+    \item \textit{Possible leakage.} \texttt{in\_person\_visit\_cnt} is our most important feature. If part of these interactions are reviews triggered by a high-risk rating (enhanced due diligence), the feature is partly caused by the target. We would check with the data owner how it is measured, and retrain without it to see how much the model depends on it.
+    \item \textit{Unstable selection.} Our first runs kept different features every time, up to 14, because of the near-duplicates and a very flat score curve. The default ``parsimonious'' rule of the library also turned out to be much stricter than one standard error. We fixed it by removing the near-duplicates and coding a real one-standard-error rule.
+    \item \textit{Overfitting}, with only 470 training clients. We used a small fixed model for the selection, CV for every choice, regularized hyperparameters and one-standard-error rules. The test scores match the CV scores, so this worked.
+    \item \textit{Leakage through preprocessing.} Fitting the scaling, SMOTE, the selection or the threshold on all the data would leak information from the test clients. Everything is fitted on the training set, SMOTE and the scaling run inside the CV, and the test set is used once.
+    \item \textit{Standardized data.} Binaries and counts were given as decimals and some columns were copies, which we fixed in Question 1.
+    \item \textit{Workload and representativeness.} Our threshold rates 56\% of the test clients as high, and the sample probably has more high-risk clients than the real portfolio. Before using the model, the threshold should be recalibrated on the real population, and the cost ratio set with compliance based on their review capacity.
+\end{itemize}
 
 \end{document}
